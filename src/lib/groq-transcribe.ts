@@ -224,8 +224,11 @@ async function transcribePcm(
     const start = index * chunkSamples;
     const slice = pcm.slice(start, Math.min(pcm.length, start + chunkSamples));
     const label = total > 1 ? `الجزء ${index + 1} من ${total}` : "التسجيل";
+    
+    // تفعيل تقدم أكثر سلاسة: 80% للرفع و 20% للمعالجة
     options.onProgress?.(index / total);
     options.onStatus(`جارٍ رفع ${label}`);
+    
     const blob = encodeWav(slice, sampleRate);
     const part = await requestChunk({
       blob,
@@ -235,11 +238,15 @@ async function transcribePcm(
       prompt: carry,
       signal: options.signal,
       onUpload: (ratio) => {
-        options.onProgress?.((index + ratio) / total);
-        options.onStatus(ratio >= 1 ? `يكتب Whisper ${label}` : `جارٍ رفع ${label}`);
+        options.onProgress?.((index + ratio * 0.8) / total);
+        options.onStatus(ratio >= 1 ? `يكتب Whisper ${label}...` : `جارٍ رفع ${label}`);
       },
     });
+    
+    // عند اكتمال الجزء، نرفع التقدم لـ 100% من هذا الجزء
+    options.onProgress?.((index + 1) / total);
     parts.push(shift(part, start / sampleRate));
+    
     const tail = part.text.trim().slice(-240);
     carry = [options.prompt.trim(), tail].filter(Boolean).join("\n").slice(-400);
   }
