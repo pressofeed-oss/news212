@@ -39,10 +39,10 @@ export const TRANSLATE_MODELS: Record<
 
 /** Safe for Groq's free-tier upload cap. Larger files are split in the browser. */
 export const DIRECT_LIMIT = 24 * 1024 * 1024;
-const DECODE_LIMIT = 150 * 1024 * 1024;
+const DECODE_LIMIT = 250 * 1024 * 1024; // Increased to 250MB for safer handling of large files
 const TARGET_RATE = 16_000;
 const CHUNK_SECONDS = 90;
-const REQUEST_TIMEOUT_MS = 100_000;
+const REQUEST_TIMEOUT_MS = 120_000; // Increased timeout for huge files
 
 const EXTENSIONS = new Set([
   "flac",
@@ -170,7 +170,7 @@ export async function transcribeRecording(options: {
   }
 
   if (options.file.size > DECODE_LIMIT) {
-    throw new TranscribeError("الملف أكبر مما يستطيع المتصفح تقسيمه. اضغطه إلى أقل من ١٥٠ م.ب.");
+    throw new TranscribeError("الملف أكبر مما يستطيع المتصفح تقسيمه. اضغطه إلى أقل من ٢٥٠ م.ب.");
   }
 
   const label = slowed ? "جارٍ إبطاء التسجيل" : "جارٍ تجهيز التسجيل";
@@ -179,27 +179,58 @@ export async function transcribeRecording(options: {
     options.onProgress?.(clamped);
     options.onStatus(text);
   };
-  report(0.05, "جارٍ قراءة التسجيل");
-  const loaded = await loadPcm(options.file, options.signal, report);
-  report(0.62, "جارٍ تجهيز النسخة البطيئة");
-  const atTarget = await resampleMono(loaded.samples, loaded.sampleRate || TARGET_RATE, TARGET_RATE, options.signal, (ratio) =>
-    report(0.62 + ratio * 0.1, "جارٍ تجهيز النسخة البطيئة"),
-  );
-  const sampleRate = slowed ? Math.max(8_000, Math.round(TARGET_RATE * options.speed)) : TARGET_RATE;
-  const needed = slowed
-    ? Math.max(1, Math.round((atTarget.length * sampleRate) / (TARGET_RATE * options.speed)))
-    : atTarget.length;
-  const pcm =
-    needed === atTarget.length
-      ? atTarget
-      : await stretchTo(atTarget, needed, options.signal, (ratio) => report(0.72 + ratio * 0.08, "جارٍ تجهيز النسخة البطيئة"));
-  report(0.82, "جارٍ إرسال التسجيل");
-  const transcript = await transcribePcm(pcm, sampleRate, {
-    ...options,
-    onStatus: (message) => options.onStatus(message),
-    onProgress: (ratio) => report(0.82 + ratio * 0.18, "جارٍ إرسال التسجيل"),
-  });
-  return scaleTimes(transcript, slowed ? options.speed : 1);
+
+  //- Enhanced Heartbeat status for huge files
+  let heartbeatInterval: NodeJS.Timeout | null = null;
+  const startHeartbeat = (msg: string) => {
+    heartbeatInterval = setInterval(() => {
+      options.onStatus(`${msg} (لا تزال العملية مستمرة...)`);
+    }, 5000);
+  };
+  const stopHeartbeat = () => {
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
+  };
+
+  try {
+    report(0.05, "جارٍ قراءة التسجيل");
+    startHeartbeat("جارٍ قراءة التسجيل");
+    const loaded = await loadPcm(options.file, options.signal, report);
+    stopHeartbeat();
+
+    report(0.62, "جارٍ تجهيز النسخة الصوتية");
+    startHeartbeat("جارٍ تجهيز البيانات الصوتية");
+    const atTarget = await resampleMono(loaded.samples, loaded.sampleRate || TARGET_RATE, TARGET_RATE, options.signal, (ratio) =>
+      report(0.62 + ratio * 0.1, "جارٍ تجهيز النسخة الصوتية"),
+    );
+    stopHeartbeat();
+
+    const sampleRate = slowed ? Math.max(8_000, Math.round(TARGET_RATE * options.speed)) : TARGET_RATE;
+    const needed = slowed
+      ? Math.max(1, Math.round((atTarget.length * sampleRate) / (TARGET_RATE * options.speed)))
+      : atTarget.length;
+    
+    report(0.72, "جارٍ تحسين جودة الصوت");
+    startHeartbeat("جارٍ تحسين جودة الصوت");
+    const pcm =
+      needed === atTarget.length
+        ? atTarget
+        : await stretchTo(atTarget, needed, options.signal, (ratio) => report(0.72 + ratio * 0.08, "جارٍ تحسين جودة الصوت"));
+    stopHeartbeat();
+
+    report(0.82, "جارٍ إرسال التسجيل إلى Groq");
+    startHeartbeat("جارٍ إرسال البيانات");
+    const transcript = await transcribePcm(pcm, sampleRate, {
+      ...options,
+      onStatus: (message) => options.onStatus(message),
+      onProgress: (ratio) => report(0.82 + ratio * 0.18, "جارٍ إرسال التسجيل"),
+    });
+    stopHeartbeat();
+    
+    return scaleTimes(transcript, slowed ? options.speed : 1);
+  } catch (err) {
+    stopHeartbeat();
+    throw err;
+  }
 }
 
 async function transcribePcm(
@@ -224,11 +255,8 @@ async function transcribePcm(
     const start = index * chunkSamples;
     const slice = pcm.slice(start, Math.min(pcm.length, start + chunkSamples));
     const label = total > 1 ? `الجزء ${index + 1} من ${total}` : "التسجيل";
-    
-    // تفعيل تقدم أكثر سلاسة: 80% للرفع و 20% للمعالجة
     options.onProgress?.(index / total);
     options.onStatus(`جارٍ رفع ${label}`);
-    
     const blob = encodeWav(slice, sampleRate);
     const part = await requestChunk({
       blob,
@@ -238,15 +266,11 @@ async function transcribePcm(
       prompt: carry,
       signal: options.signal,
       onUpload: (ratio) => {
-        options.onProgress?.((index + ratio * 0.8) / total);
+        options.onProgress?.((index + ratio) / total);
         options.onStatus(ratio >= 1 ? `يكتب Whisper ${label}...` : `جارٍ رفع ${label}`);
       },
     });
-    
-    // عند اكتمال الجزء، نرفع التقدم لـ 100% من هذا الجزء
-    options.onProgress?.((index + 1) / total);
     parts.push(shift(part, start / sampleRate));
-    
     const tail = part.text.trim().slice(-240);
     carry = [options.prompt.trim(), tail].filter(Boolean).join("\n").slice(-400);
   }
@@ -633,7 +657,7 @@ async function decodeNative(
   if (!ctx) return null;
   try {
     const decoded = await new Promise<AudioBuffer>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("timeout")), 8_000);
+      const timer = setTimeout(() => reject(new Error("timeout")), 15_000); // Increased timeout for large files
       const onAbort = () => {
         clearTimeout(timer);
         reject(new DOMException("أُلغي التفريغ", "AbortError"));
@@ -656,7 +680,7 @@ async function decodeNative(
     if (decoded.length === 0) throw new TranscribeError("التسجيل فارغ.");
     const mono = new Float32Array(decoded.length);
     const channels = decoded.numberOfChannels || 1;
-    const block = 200_000;
+    const block = 500_000; // Increased block size for faster processing
     for (let channel = 0; channel < channels; channel += 1) {
       const data = decoded.getChannelData(channel);
       for (let start = 0; start < data.length; start += block) {
@@ -703,7 +727,7 @@ async function stretchTo(
   }
   const out = new Float32Array(length);
   const max = Math.max(0, samples.length - 1);
-  const block = 250_000;
+  const block = 500_000; // Increased block size for speed
   for (let start = 0; start < length; start += block) {
     if (signal.aborted) throw new DOMException("أُلغي التفريغ", "AbortError");
     const end = Math.min(length, start + block);
