@@ -362,7 +362,7 @@ export function Transcriber() {
       <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="text-sm font-medium text-copper">Groq · Whisper Large V3</p>
-          <h1 className="font-display text-5xl leading-none text-ink">مداد</h1>
+          <h1 className="font-display text-5xl leading-none text-ink">مداد - النسخة المطورة</h1>
           <p className="mt-3 max-w-md text-base leading-relaxed text-muted">
             اسحب التسجيل، أبطئه إن كان مسرّعاً، ثم فرّغه أو ترجمه إلى العربية.
           </p>
